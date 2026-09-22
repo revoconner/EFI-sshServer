@@ -1,0 +1,50 @@
+## @file
+#  UEFI SSH server that exposes the EDK2 Shell over the network.
+#  This is a sketch. See README.md for what still needs doing.
+##
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = SshShell
+  FILE_GUID      = 6d2f9a10-4c7b-4e2a-9f11-8a3c2b7e0d55
+  MODULE_TYPE    = UEFI_APPLICATION
+  VERSION_STRING = 0.1
+  ENTRY_POINT    = SshShellEntry
+
+[Sources]
+  SshShellServer.c
+  ConsoleShim.c
+  ConsoleShim.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  NetworkPkg/NetworkPkg.dec
+  ShellPkg/ShellPkg.dec
+  # The wolfSSL/wolfSSH package you build. Point this at wherever you put
+  # its .dec. See README.md.
+  # wolfssl/wolfssl.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  UefiLib
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  DebugLib
+  PrintLib
+  DevicePathLib
+  # wolfssl / wolfssh library classes go here too
+
+[Protocols]
+  gEfiTcp4ServiceBindingProtocolGuid   ## CONSUMES
+  gEfiTcp4ProtocolGuid                 ## CONSUMES
+  gEfiSimpleTextInProtocolGuid         ## PRODUCES
+  gEfiSimpleTextOutProtocolGuid        ## PRODUCES
+  gEfiFirmwareVolume2ProtocolGuid      ## CONSUMES
+
+[Guids]
+
+[Pcd]
