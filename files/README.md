@@ -4,6 +4,9 @@ First working implementation of SSH server inside UEFI pre boot shell environmen
 
 `SshShell [-p port] [-u user] [-w password] [-s \path\Shell.efi] [-o "shell options"] [-d]`
 
+<img width="3388" height="1311" alt="image" src="https://github.com/user-attachments/assets/64cc5ec6-5c76-4068-a7d3-be30e38c374d" />
+
+
 **Defaults**:
 - port: 22
 - user: admin
