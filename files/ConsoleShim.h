@@ -1,92 +1,64 @@
-/** @file
-  Console shim: fake SimpleTextIn / SimpleTextOut backed by an SSH channel.
-
-  The idea. The EDK2 Shell reads keys from gST->ConIn and writes to
-  gST->ConOut. It has no idea where those go. So we build our own ConIn/ConOut
-  that push bytes through wolfSSH instead of the local screen, swap the two
-  pointers in the system table, then launch the Shell. It renders to the SSH
-  client without any change to the Shell itself. Same trick serial redirect uses.
-*/
+/* Console shim: SimpleTextIn, SimpleTextInEx and SimpleTextOut backed by an SSH channel. The EDK2 Shell reads keys from gST->ConIn and writes to gST->ConOut without caring where they go, so we swap in these, launch a nested Shell, and put the originals back when it exits. Same trick a serial console redirect uses. */
 
 #ifndef SSH_CONSOLE_SHIM_H_
 #define SSH_CONSOLE_SHIM_H_
 
-#include <Uefi.h>
-#include <Protocol/SimpleTextIn.h>
-#include <Protocol/SimpleTextOut.h>
-#include <Protocol/Tcp4.h>
+#include "uefi.h"
+#include "ssh.h"
 
-// wolfSSH. Comes from the port you build (see README).
-#include <wolfssh/ssh.h>
-
-#define RAW_RX_SIZE   4096   // ciphertext bytes drained from TCP, waiting for wolfSSH
-#define PLAIN_SIZE    512    // decrypted bytes waiting to be turned into EFI keys
-#define KEY_RING_SIZE 128    // decoded EFI keys waiting for the Shell to read
-#define RX_SCRATCH    1024   // one TCP receive lands here
+#define SHIM_KEY_RING   256
+#define SHIM_MAX_NOTIFY 16
+#define SHIM_OUT_BUF    2048
 
 typedef struct {
-  UINT8  Data[RAW_RX_SIZE];
-  UINTN  Head;
-  UINTN  Tail;
-} BYTE_RING;
+    EFI_KEY_DATA            Key;
+    EFI_KEY_NOTIFY_FUNCTION Fn;
+    BOOLEAN                 Used;
+} SHIM_NOTIFY;
 
 typedef struct {
-  EFI_INPUT_KEY Key[KEY_RING_SIZE];
-  UINTN         Head;
-  UINTN         Tail;
-} KEY_RING;
+    SSH_CONN                         *Ssh;
 
-typedef struct {
-  // network
-  EFI_TCP4_PROTOCOL *Tcp;          // the connected socket (child from Accept)
-  BOOLEAN            Connected;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL    TextIn;
+    EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL TextInEx;
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL   TextOut;
+    SIMPLE_TEXT_OUTPUT_MODE           Mode;
+    EFI_HANDLE                        Handle;
 
-  // one always-posted receive, drains TCP into Raw in the background
-  EFI_TCP4_IO_TOKEN       RxToken;
-  EFI_TCP4_RECEIVE_DATA   RxData;
-  EFI_TCP4_FRAGMENT_DATA  RxFrag;  // RxData has a 1-entry table, reuse this
-  UINT8                   RxScratch[RX_SCRATCH];
-  BYTE_RING               Raw;
+    EFI_KEY_DATA Keys[SHIM_KEY_RING];
+    UINTN        KeyHead;
+    UINTN        KeyTail;
+    UINT8        Esc[24];
+    UINTN        EscLen;
+    UINT64       EscTick;
+    UINT32       Utf8Acc;
+    int          Utf8Need;
+    BOOLEAN      LastWasCr;
+    SHIM_NOTIFY  Notify[SHIM_MAX_NOTIFY];
 
-  // ssh
-  WOLFSSH     *Ssh;
-  WOLFSSH_CTX *Ctx;
+    UINT32       Cols;
+    UINT32       Rows;
+    BOOLEAN      PendingWrap;
+    UINT8        OutBuf[SHIM_OUT_BUF];
+    UINTN        OutLen;
+    UINTN        OutPoll;
 
-  // input decode
-  UINT8    Plain[PLAIN_SIZE];
-  UINTN    PlainLen;
-  KEY_RING Keys;
+    BOOLEAN      Disconnected;
+    UINTN        ExitInjects;
 
-  // the shim protocols. embedded so we can get back to the session with BASE_CR.
-  EFI_SIMPLE_TEXT_INPUT_PROTOCOL   TextIn;
-  EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL  TextOut;
-  SIMPLE_TEXT_OUTPUT_MODE          TextOutMode;
-  EFI_HANDLE                       ConHandle;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *OldConIn;
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *OldConOut;
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *OldStdErr;
+    EFI_HANDLE                       OldInHandle;
+    EFI_HANDLE                       OldOutHandle;
+    EFI_HANDLE                       OldErrHandle;
+    BOOLEAN                          Installed;
+} CONSOLE_SHIM;
 
-  // saved console so we can put it back on exit
-  EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *OldConIn;
-  EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *OldConOut;
-  EFI_HANDLE                       OldConInHandle;
-  EFI_HANDLE                       OldConOutHandle;
-} SSH_SESSION;
+/* Builds the protocols and swaps them into the system table. */
+EFI_STATUS ShimInstall(CONSOLE_SHIM *S, SSH_CONN *ssh);
 
-#define SESSION_FROM_TEXTIN(a)  BASE_CR (a, SSH_SESSION, TextIn)
-#define SESSION_FROM_TEXTOUT(a) BASE_CR (a, SSH_SESSION, TextOut)
-
-// wolfSSH IO callbacks. Set these on the CTX. ctx pointer is the SSH_SESSION.
-int SshRecvCb (WOLFSSH *ssh, void *buf, word32 sz, void *ctx);
-int SshSendCb (WOLFSSH *ssh, void *buf, word32 sz, void *ctx);
-
-// Arm (or re-arm) the persistent TCP receive. Call once after connect.
-EFI_STATUS ArmReceive (SSH_SESSION *S);
-
-// Build the shim protocols, swap gST->ConIn/ConOut to point at them.
-EFI_STATUS InstallConsoleShim (SSH_SESSION *S);
-
-// Put the real console back. Call after the nested Shell exits.
-EFI_STATUS RemoveConsoleShim (SSH_SESSION *S);
-
-// Push raw bytes to the client (helper used by the output shim).
-EFI_STATUS SshSendBytes (SSH_SESSION *S, CONST UINT8 *Buf, UINTN Len);
+/* Restores the original console. Call after the nested Shell exits. */
+VOID ShimRemove(CONSOLE_SHIM *S);
 
 #endif
