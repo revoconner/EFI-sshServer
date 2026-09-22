@@ -26,24 +26,82 @@ EFI_GUID gEfiRngProtocolGuid               = { 0x3152bca5, 0xeade, 0x433d, { 0x8
 /* Referenced by clang if any floating point sneaks in. */
 int _fltused = 0;
 
+BOOLEAN gDebug = FALSE;
+
+UINT64 RtNow(void)
+{
+    EFI_TIME t;
+    if (gRT == NULL || EFI_ERROR(gRT->GetTime(&t, NULL))) {
+        return 0;
+    }
+    return ((UINT64)t.Year * 372 + (UINT64)t.Month * 31 + t.Day) * 86400ULL + (UINT64)t.Hour * 3600 + (UINT64)t.Minute * 60 + t.Second;
+}
+
+BOOLEAN RtTimedOut(UINT64 startSec, UINTN spins, UINTN usPerSpin, UINTN limitMs)
+{
+    if (startSec != 0 && (spins & 63) == 0) {
+        UINT64 now = RtNow();
+        if (now != 0 && now > startSec && (now - startSec) * 1000 > limitMs + 1000) {
+            return TRUE;
+        }
+    }
+    return (BOOLEAN)(spins * usPerSpin > limitMs * 1000 * 4);
+}
+
+static UINTN mImageBase;
+static UINTN mImageSize;
+
 void RtInit(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
+    EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
     gST = SystemTable;
     gBS = SystemTable->BootServices;
     gRT = SystemTable->RuntimeServices;
     gImageHandle = ImageHandle;
     mLocalOut = SystemTable->ConOut;
+    if (!EFI_ERROR(gBS->HandleProtocol(ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&li)) && li != NULL) {
+        mImageBase = (UINTN)li->ImageBase;
+        mImageSize = (UINTN)li->ImageSize;
+    }
 }
 
+/* Walks the frame pointer chain (clang keeps rbp frames on the UEFI target) and prints return addresses as image offsets that match the linker map, then halts. */
+__attribute__((noinline)) void RtBacktrace(const char *why)
+{
+    UINTN *fp = __builtin_frame_address(0);
+    int    i;
+    Print("BUG: %s\nBacktrace (offsets into SshShell.efi):\n", why);
+    for (i = 0; i < 14 && fp != NULL; i++) {
+        UINTN ret = fp[1];
+        UINTN next = fp[0];
+        if (ret >= mImageBase && ret < mImageBase + mImageSize) {
+            Print("  +%lx\n", (UINT64)(ret - mImageBase));
+        } else {
+            Print("  %lx (outside image)\n", (UINT64)ret);
+        }
+        if (next <= (UINTN)fp || next - (UINTN)fp > 0x200000) {
+            break;
+        }
+        fp = (UINTN *)next;
+    }
+    for (;;) {
+        gBS->Stall(1000000);
+    }
+}
+
+/* AllocatePool only guarantees 8 byte alignment. wolfCrypt structures carry ALIGN16 members and clang emits aligned SSE moves for them, so every block is realigned to 16 bytes with the raw pointer stored just before it. */
 void *RtAlloc(UINTN size)
 {
-    void *p = NULL;
+    void  *raw = NULL;
+    UINT8 *p;
     if (size == 0) {
         size = 1;
     }
-    if (EFI_ERROR(gBS->AllocatePool(EfiBootServicesData, size, &p))) {
+    if (EFI_ERROR(gBS->AllocatePool(EfiBootServicesData, size + 32, &raw)) || raw == NULL) {
         return NULL;
     }
+    p = (UINT8 *)(((UINTN)raw + 16 + 15) & ~(UINTN)15);
+    ((void **)p)[-1] = raw;
     return p;
 }
 
@@ -59,7 +117,7 @@ void *RtAllocZero(UINTN size)
 void RtFree(void *p)
 {
     if (p != NULL) {
-        gBS->FreePool(p);
+        gBS->FreePool(((void **)p)[-1]);
     }
 }
 
@@ -233,14 +291,17 @@ int UefiRandSeed(unsigned char *out, unsigned int sz)
     EFI_RNG_PROTOCOL *rng = NULL;
     unsigned int i;
     int haveSource = 0;
+    const char *source = "none";
 
     memset(out, 0, sz);
-    if (!EFI_ERROR(gBS->LocateProtocol(&gEfiRngProtocolGuid, NULL, (VOID **)&rng)) && rng != NULL) {
-        if (!EFI_ERROR(rng->GetRNG(rng, NULL, sz, out))) {
-            haveSource = 1;
-        }
+    if (gDebug) {
+        Print("Entropy: seed request %u bytes, probing cpuid\n", sz);
     }
+    /* RDRAND first. The firmware RNG protocol is only consulted when the CPU has no RDRAND, since some firmware implementations are slow or block. */
     if (HaveRdrand()) {
+        if (gDebug) {
+            Print("Entropy: rdrand present\n");
+        }
         for (i = 0; i < sz; i += 8) {
             UINT64 v;
             unsigned int j;
@@ -251,7 +312,20 @@ int UefiRandSeed(unsigned char *out, unsigned int sz)
                 out[i + j] ^= (unsigned char)(v >> (8 * j));
             }
             haveSource = 1;
+            source = "rdrand";
         }
+    }
+    if (!haveSource && !EFI_ERROR(gBS->LocateProtocol(&gEfiRngProtocolGuid, NULL, (VOID **)&rng)) && rng != NULL) {
+        if (gDebug) {
+            Print("Entropy: calling firmware RNG protocol\n");
+        }
+        if (!EFI_ERROR(rng->GetRNG(rng, NULL, sz, out))) {
+            haveSource = 1;
+            source = "firmware RNG protocol";
+        }
+    }
+    if (gDebug) {
+        Print("Entropy: %s, %u bytes\n", source, sz);
     }
     /* Jitter mixing. Weak on its own, so it only supplements the sources above. */
     for (i = 0; i < sz; i++) {
@@ -268,10 +342,36 @@ int UefiRandSeed(unsigned char *out, unsigned int sz)
 
 /* C library subset. Byte loops on purpose, no libc exists here. */
 
-void *memcpy(void *d, const void *s, size_t n)
+/* A copy longer than this is a bug somewhere. Report the caller and stop instead of walking off the end of memory. */
+#define RT_INSANE_LEN (64ULL * 1024 * 1024)
+
+static void InsaneLen(const char *what, size_t n, void *ret)
+{
+    Print("BUG: %s with length %lx, called from %lx\n", what, (UINT64)n, (UINT64)(UINTN)ret);
+    RtBacktrace(what);
+}
+
+/* Diagnostic: a hash update fed a runaway length shows up as thousands of back to back 64 byte copies with the source marching forward. Plain byte loop with a standard frame so the backtrace walker can start here. */
+static const unsigned char *mLastSrc;
+static UINTN mChain;
+
+__attribute__((optnone, noinline)) void *memcpy(void *d, const void *s, size_t n)
 {
     unsigned char *dd = d;
     const unsigned char *ss = s;
+    if (n > RT_INSANE_LEN) {
+        InsaneLen("memcpy", n, __builtin_return_address(0));
+    }
+    if (n == 64) {
+        if (ss == mLastSrc + 64) {
+            if (++mChain > 20000) {
+                RtBacktrace("memcpy: 20000 consecutive 64 byte block copies, runaway hash length");
+            }
+        } else {
+            mChain = 0;
+        }
+        mLastSrc = ss;
+    }
     while (n-- > 0) {
         *dd++ = *ss++;
     }
@@ -284,6 +384,9 @@ void *memmove(void *d, const void *s, size_t n)
     const unsigned char *ss = s;
     if (dd == ss || n == 0) {
         return d;
+    }
+    if (n > RT_INSANE_LEN) {
+        InsaneLen("memmove", n, __builtin_return_address(0));
     }
     if (dd < ss) {
         while (n-- > 0) {
@@ -302,6 +405,9 @@ void *memmove(void *d, const void *s, size_t n)
 void *memset(void *d, int c, size_t n)
 {
     unsigned char *dd = d;
+    if (n > RT_INSANE_LEN) {
+        InsaneLen("memset", n, __builtin_return_address(0));
+    }
     while (n-- > 0) {
         *dd++ = (unsigned char)c;
     }

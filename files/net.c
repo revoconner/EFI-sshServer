@@ -31,14 +31,19 @@ static EFI_STATUS MakeEvent(EFI_EVENT *ev)
 /* Spins until the token completes. timeoutMs of 0 means forever. */
 static EFI_STATUS WaitToken(EFI_TCP4_PROTOCOL *tcp, EFI_TCP4_COMPLETION_TOKEN *tok, UINTN timeoutMs)
 {
-    UINTN spins = 0;
+    UINTN  spins = 0;
+    UINT64 start = RtNow();
     for (;;) {
         tcp->Poll(tcp);
         if (gBS->CheckEvent(tok->Event) == EFI_SUCCESS) {
             return tok->Status;
         }
+        if (tok->Status != EFI_NOT_READY && (spins & 1023) == 1023 && gDebug) {
+            Print("net: token status %r but event not signaled\n", tok->Status);
+        }
         gBS->Stall(100);
-        if (timeoutMs != 0 && ++spins > timeoutMs * 10) {
+        spins++;
+        if (timeoutMs != 0 && RtTimedOut(start, spins, 100, timeoutMs)) {
             return EFI_TIMEOUT;
         }
     }
@@ -198,6 +203,9 @@ static void PostReceive(NET_CONN *conn)
     conn->RxTok.CompletionToken.Status = EFI_NOT_READY;
     st = conn->Tcp->Receive(conn->Tcp, &conn->RxTok);
     if (EFI_ERROR(st)) {
+        if (gDebug) {
+            Print("net: Receive post failed %r\n", st);
+        }
         conn->Closed = TRUE;
         return;
     }
@@ -220,6 +228,9 @@ int NetRead(void *ctx, UINT8 *buf, UINTN max)
         if (conn->RxPosted && gBS->CheckEvent(conn->RxTok.CompletionToken.Event) == EFI_SUCCESS) {
             EFI_STATUS st = conn->RxTok.CompletionToken.Status;
             conn->RxPosted = FALSE;
+            if (gDebug) {
+                Print("net: rx done %r, %u bytes\n", st, conn->RxData.DataLength);
+            }
             if (EFI_ERROR(st)) {
                 conn->Closed = TRUE;
             } else {
@@ -252,7 +263,7 @@ int NetWrite(void *ctx, const UINT8 *buf, UINTN len)
         return -1;
     }
     while (len > 0) {
-        UINTN chunk = len > 32768 ? 32768 : len;
+        UINTN chunk = len > 8192 ? 8192 : len;
         memset(&tok, 0, sizeof(tok));
         memset(&td, 0, sizeof(td));
         if (EFI_ERROR(MakeEvent(&tok.CompletionToken.Event))) {
@@ -267,15 +278,22 @@ int NetWrite(void *ctx, const UINT8 *buf, UINTN len)
         td.FragmentTable[0].FragmentBuffer = (VOID *)buf;
         tok.Packet.TxData = &td;
         st = conn->Tcp->Transmit(conn->Tcp, &tok);
+        if (gDebug) {
+            Print("net: tx %u bytes posted %r\n", (unsigned)chunk, st);
+        }
         if (!EFI_ERROR(st)) {
             st = WaitToken(conn->Tcp, &tok.CompletionToken, 30000);
             if (st == EFI_TIMEOUT) {
                 conn->Tcp->Cancel(conn->Tcp, &tok.CompletionToken);
                 WaitToken(conn->Tcp, &tok.CompletionToken, 1000);
             }
+            if (gDebug) {
+                Print("net: tx done %r\n", st);
+            }
         }
         gBS->CloseEvent(tok.CompletionToken.Event);
         if (EFI_ERROR(st)) {
+            Print("net: transmit failed %r\n", st);
             conn->Closed = TRUE;
             return -1;
         }

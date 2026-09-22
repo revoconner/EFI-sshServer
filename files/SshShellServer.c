@@ -86,7 +86,7 @@ static void ToAscii(const CHAR16 *s, char *d, UINTN cap)
 
 static void Usage(void)
 {
-    Print("Usage: SshShell.efi [-p port] [-u user] [-w password] [-s \\path\\Shell.efi] [-o \"shell options\"]\n");
+    Print("Usage: SshShell.efi [-p port] [-u user] [-w password] [-s \\path\\Shell.efi] [-o \"shell options\"] [-d]\n");
     Print("  Defaults: port %u, user %s, shell options \"%s\"\n", SSH_DEFAULT_PORT, SSH_DEFAULT_USER, SSH_DEFAULT_SHELL_OPTS);
 }
 
@@ -150,6 +150,10 @@ static BOOLEAN ParseArgs(void)
         if (a[1] == 'h' || a[1] == '?') {
             Usage();
             return FALSE;
+        }
+        if (a[1] == 'd') {
+            gDebug = TRUE;
+            continue;
         }
         if (i + 1 >= argc) {
             Usage();
@@ -398,6 +402,12 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     gBS->SetWatchdogTimer(0, 0, 0, NULL);
 
     Print("UEFI SSH Shell server\n");
+    if (gDebug) {
+        EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
+        if (!EFI_ERROR(gBS->HandleProtocol(gImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&li)) && li != NULL) {
+            Print("Image base %lx size %lx\n", (UINT64)(UINTN)li->ImageBase, li->ImageSize);
+        }
+    }
     SshPrintHostKey(HOST_KEY_SEED);
     Print("Login: user %s\n", mCfg.User);
 

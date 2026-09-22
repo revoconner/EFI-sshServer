@@ -391,6 +391,9 @@ static int SendPacket(SSH_CONN *c, const UINT8 *payload, UINTN len)
         }
     }
     c->out.seq++;
+    if (gDebug) {
+        Print("SSH: tx msg %u len %u\n", payload[0], (unsigned)len);
+    }
     if (c->wr(c->ioCtx, tx, total + macLen) != 0) {
         c->state = ST_CLOSED;
         return -1;
@@ -1220,6 +1223,9 @@ static int TryProcessOne(SSH_CONN *c)
     }
     payloadLen = c->rxPktLen - 1 - padLen;
     c->in.seq++;
+    if (gDebug) {
+        Print("SSH: rx msg %u len %u\n", c->rx[5], (unsigned)payloadLen);
+    }
     ret = HandlePacket(c, c->rx + 5, payloadLen);
 
     memmove(c->rx, c->rx + need, c->rxLen - need);
@@ -1244,7 +1250,7 @@ static int ProcessInput(SSH_CONN *c, BOOLEAN *progressed)
         if (c->rxLen < SSH_RX_BUF) {
             n = c->rd(c->ioCtx, c->rx + c->rxLen, SSH_RX_BUF - c->rxLen);
             if (n < 0) {
-                if (c->state != ST_CLOSED) {
+                if (c->state != ST_CLOSED && !c->closeSent) {
                     Print("SSH: connection lost\n");
                 }
                 c->state = ST_CLOSED;
@@ -1316,6 +1322,9 @@ SSH_CONN *SshNew(SSH_IO_READ rd, SSH_IO_WRITE wr, void *ioCtx, const UINT8 *host
         SshFree(c);
         return NULL;
     }
+    if (gDebug) {
+        Print("SSH: init RNG (health test runs first, then seeding)\n");
+    }
     ret = wc_InitRng(&c->rng);
     if (ret != 0) {
         Print("SSH: RNG init failed (%d). No entropy source?\n", ret);
@@ -1330,6 +1339,9 @@ SSH_CONN *SshNew(SSH_IO_READ rd, SSH_IO_WRITE wr, void *ioCtx, const UINT8 *host
         return NULL;
     }
     c->hostKeyInit = TRUE;
+    if (gDebug) {
+        Print("SSH: RNG and host key ready\n");
+    }
     if (wc_AesInit(&c->in.aes, NULL, INVALID_DEVID) != 0 || wc_AesInit(&c->out.aes, NULL, INVALID_DEVID) != 0) {
         SshFree(c);
         return NULL;
@@ -1368,7 +1380,8 @@ int SshPoll(SSH_CONN *c)
 
 int SshAccept(SSH_CONN *c)
 {
-    UINTN idle = 0;
+    UINTN  idle = 0;
+    UINT64 start = RtNow();
 
     if (!c->versionSent) {
         char line[80];
@@ -1376,11 +1389,17 @@ int SshAccept(SSH_CONN *c)
         memcpy(line, SSH_SERVER_VERSION, n);
         line[n++] = '\r';
         line[n++] = '\n';
+        if (gDebug) {
+            Print("SSH: sending version\n");
+        }
         if (c->wr(c->ioCtx, (const UINT8 *)line, n) != 0) {
             c->state = ST_CLOSED;
             return -1;
         }
         c->versionSent = TRUE;
+        if (gDebug) {
+            Print("SSH: version sent, waiting for the client\n");
+        }
     }
     while (c->state != ST_CLOSED) {
         BOOLEAN prog;
@@ -1393,9 +1412,11 @@ int SshAccept(SSH_CONN *c)
         }
         if (prog) {
             idle = 0;
+            start = RtNow();
         } else {
             gBS->Stall(1000);
-            if (++idle > SSH_ACCEPT_TIMEOUT_MS) {
+            idle++;
+            if (RtTimedOut(start, idle, 1000, SSH_ACCEPT_TIMEOUT_MS)) {
                 Disconnect(c, DISC_BY_APPLICATION, "handshake timeout");
                 return -1;
             }
@@ -1437,9 +1458,10 @@ int SshRead(SSH_CONN *c, UINT8 *buf, UINTN max)
 int SshWrite(SSH_CONN *c, const UINT8 *buf, UINTN len)
 {
     while (len > 0) {
-        UINTN waited = 0;
-        UINTN chunk;
-        WBUF  b;
+        UINTN  waited = 0;
+        UINT64 start = RtNow();
+        UINTN  chunk;
+        WBUF   b;
 
         while (c->state == ST_CONN && c->chanOpen && !c->closeSent && !c->closeRecv && (!CanSendNow(c) || c->remoteWindow == 0)) {
             BOOLEAN prog;
@@ -1448,7 +1470,8 @@ int SshWrite(SSH_CONN *c, const UINT8 *buf, UINTN len)
             }
             if (!prog) {
                 gBS->Stall(1000);
-                if (++waited > SSH_WRITE_TIMEOUT_MS) {
+                waited++;
+                if (RtTimedOut(start, waited, 1000, SSH_WRITE_TIMEOUT_MS)) {
                     return -1;
                 }
             }
@@ -1498,14 +1521,20 @@ void SshClose(SSH_CONN *c, UINT32 exitStatus)
         SendChannelReply(c, MSG_CHANNEL_EOF);
         SendChannelReply(c, MSG_CHANNEL_CLOSE);
         c->closeSent = TRUE;
-        while (c->state != ST_CLOSED && !c->closeRecv && waited < SSH_CLOSE_TIMEOUT_MS) {
-            BOOLEAN prog;
-            if (ProcessInput(c, &prog) < 0) {
-                break;
-            }
-            if (!prog) {
-                gBS->Stall(1000);
-                waited++;
+        {
+            UINT64 start = RtNow();
+            while (c->state != ST_CLOSED && !c->closeRecv) {
+                BOOLEAN prog;
+                if (ProcessInput(c, &prog) < 0) {
+                    break;
+                }
+                if (!prog) {
+                    gBS->Stall(1000);
+                    waited++;
+                    if (RtTimedOut(start, waited, 1000, SSH_CLOSE_TIMEOUT_MS)) {
+                        break;
+                    }
+                }
             }
         }
     }

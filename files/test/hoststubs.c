@@ -16,6 +16,18 @@ static EFI_STATUS EFIAPI StubStall(UINTN us)
 }
 
 static EFI_BOOT_SERVICES mBs;
+BOOLEAN gDebug = FALSE;
+
+UINT64 RtNow(void)
+{
+    return (UINT64)(__rdtsc() / 3000000000ULL);
+}
+
+BOOLEAN RtTimedOut(UINT64 startSec, UINTN spins, UINTN usPerSpin, UINTN limitMs)
+{
+    (void)startSec;
+    return (BOOLEAN)(spins * usPerSpin > limitMs * 1000 * 4);
+}
 EFI_SYSTEM_TABLE     *gST;
 EFI_BOOT_SERVICES    *gBS = &mBs;
 EFI_RUNTIME_SERVICES *gRT;

@@ -24,5 +24,5 @@ for %%f in (aes sha256 sha512 hmac hash random curve25519 ed25519 fe_operations 
     set OBJS=!OBJS! "%OUT%\wolf_%%f.o"
 )
 
-lld-link /subsystem:efi_application /entry:EfiMain /nodefaultlib /machine:x64 /out:"%OUT%\SshShell.efi" !OBJS! || exit /b 1
+lld-link /subsystem:efi_application /entry:EfiMain /nodefaultlib /machine:x64 /map:"%OUT%\SshShell.map" /out:"%OUT%\SshShell.efi" !OBJS! || exit /b 1
 echo Built %OUT%\SshShell.efi

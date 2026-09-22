@@ -25,4 +25,16 @@ int UefiRandSeed(unsigned char *out, unsigned int sz);
 /* Rough monotonic clock in TSC ticks. */
 UINT64 RtTicks(void);
 
+/* Wall clock seconds from GetTime, only good for measuring elapsed time. Returns 0 if GetTime fails. */
+UINT64 RtNow(void);
+
+/* Timeout check that works even when Stall is coarse or GetTime is broken: true once the wall clock says limitMs passed, or once spins times usPerSpin is four times over the limit. */
+BOOLEAN RtTimedOut(UINT64 startSec, UINTN spins, UINTN usPerSpin, UINTN limitMs);
+
+/* Set by -d on the command line. Turns on per packet tracing on the local console. */
+extern BOOLEAN gDebug;
+
+/* Prints a frame pointer backtrace as image offsets and halts. */
+void RtBacktrace(const char *why);
+
 #endif
