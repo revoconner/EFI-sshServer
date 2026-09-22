@@ -14,6 +14,7 @@
 #include "config.h"
 #include "hostkey.h"
 #include <string.h>
+#include <stdlib.h>
 
 typedef struct {
     char   User[64];
