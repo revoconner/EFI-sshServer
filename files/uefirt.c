@@ -65,25 +65,22 @@ void RtInit(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     }
 }
 
-/* Walks the frame pointer chain (clang keeps rbp frames on the UEFI target) and prints return addresses as image offsets that match the linker map, then halts. */
+/* Scans the stack upward for anything that looks like a return address into this image and prints those as image offsets that match the linker map, then halts. Clang's UEFI frames put rbp in the middle of the frame so a proper chain walk is not possible, a scan is crude but shows the call chain. */
 __attribute__((noinline)) void RtBacktrace(const char *why)
 {
-    UINTN *fp = __builtin_frame_address(0);
-    int    i;
-    Print("BUG: %s\nBacktrace (offsets into SshShell.efi):\n", why);
-    for (i = 0; i < 14 && fp != NULL; i++) {
-        UINTN ret = fp[1];
-        UINTN next = fp[0];
-        if (ret >= mImageBase && ret < mImageBase + mImageSize) {
-            Print("  +%lx\n", (UINT64)(ret - mImageBase));
-        } else {
-            Print("  %lx (outside image)\n", (UINT64)ret);
+    UINTN *p = __builtin_frame_address(0);
+    UINTN  text = mImageBase + 0x1000;
+    UINTN  textEnd = mImageBase + mImageSize;
+    int    i, shown = 0;
+    Print("BUG: %s\nStack scan (offsets into SshShell.efi, newest first):\n", why);
+    for (i = 0; i < 6000 && shown < 40; i++) {
+        UINTN v = p[i];
+        if (v >= text && v < textEnd) {
+            Print(" +%lx", (UINT64)(v - mImageBase));
+            shown++;
         }
-        if (next <= (UINTN)fp || next - (UINTN)fp > 0x200000) {
-            break;
-        }
-        fp = (UINTN *)next;
     }
+    Print("\n");
     for (;;) {
         gBS->Stall(1000000);
     }
@@ -351,26 +348,12 @@ static void InsaneLen(const char *what, size_t n, void *ret)
     RtBacktrace(what);
 }
 
-/* Diagnostic: a hash update fed a runaway length shows up as thousands of back to back 64 byte copies with the source marching forward. Plain byte loop with a standard frame so the backtrace walker can start here. */
-static const unsigned char *mLastSrc;
-static UINTN mChain;
-
-__attribute__((optnone, noinline)) void *memcpy(void *d, const void *s, size_t n)
+void *memcpy(void *d, const void *s, size_t n)
 {
     unsigned char *dd = d;
     const unsigned char *ss = s;
     if (n > RT_INSANE_LEN) {
         InsaneLen("memcpy", n, __builtin_return_address(0));
-    }
-    if (n == 64) {
-        if (ss == mLastSrc + 64) {
-            if (++mChain > 20000) {
-                RtBacktrace("memcpy: 20000 consecutive 64 byte block copies, runaway hash length");
-            }
-        } else {
-            mChain = 0;
-        }
-        mLastSrc = ss;
     }
     while (n-- > 0) {
         *dd++ = *ss++;

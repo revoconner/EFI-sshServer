@@ -5,6 +5,10 @@
 
 #include <stddef.h>
 
+/* The UEFI target is LLP64 like Windows: long is 4 bytes. Without these two, wolfSSL's types.h assumes a 64 bit long on x86_64 and makes word64 a 32 bit type, which silently breaks SHA-512, ed25519 and the constant time min() (a shift by 63 on a 32 bit value). */
+#define SIZEOF_LONG      4
+#define SIZEOF_LONG_LONG 8
+
 #define WOLFCRYPT_ONLY
 #define SINGLE_THREADED
 #define NO_FILESYSTEM

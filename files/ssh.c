@@ -14,6 +14,11 @@
 #include <wolfssl/wolfcrypt/curve25519.h>
 #include <wolfssl/wolfcrypt/ed25519.h>
 
+/* wolfSSL guesses integer widths from the architecture. Catch a wrong guess at compile time, it corrupts every 64 bit hash silently otherwise. */
+_Static_assert(sizeof(word64) == 8, "word64 must be 8 bytes, check SIZEOF_LONG in user_settings.h");
+_Static_assert(sizeof(word32) == 4, "word32 must be 4 bytes");
+_Static_assert(sizeof(wolfssl_word) == 8, "wolfssl_word must be 8 bytes on x86_64");
+
 #define MSG_DISCONNECT             1
 #define MSG_IGNORE                 2
 #define MSG_UNIMPLEMENTED          3
