@@ -91,3 +91,6 @@ Hyper-V firmware has no Shell in its volumes, so on that VM the file fallback is
 ## AI Use
 
 Co-Authored by Anthropic Claude Fable 5.1 <claude@anthropic.com>
+
+## Production use
+**IMPORTANT**: If building from source, use the genkey.py to generate a new hostkey.h file, do not use the committed one.
